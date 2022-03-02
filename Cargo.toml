@@ -3,7 +3,6 @@ name = "tokio-tasker"
 version = "1.0.1"
 description = "Lets you stop and join groups of Tokio tasks."
 authors = ["Vojtech Kral <vojtech@kral.pm>"]
-license = "MIT"
 license-file = "LICENSE"
 edition = "2018"
 resolver = "2"
