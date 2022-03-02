@@ -53,6 +53,9 @@
 //! There are also the [`poll_join()`][Tasker::poll_join()] and [`try_poll_join()`][Tasker::try_poll_join()]
 //! non-`async` variants which join already finished tasks without waiting, and release memory used by their handles.
 //!
+//! Finally, there is [`join_stream()`][Tasker::join_stream()] which lets you asynchronously receive task results
+//! as they become available, ie. as tasks terminate.
+//!
 //! ## Example
 //!
 //! A simple case of using `Tasker` in `main()`:
@@ -114,9 +117,10 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::vec;
 
-use futures_util::future::FusedFuture;
+use futures_util::future::{Fuse, FusedFuture};
+use futures_util::stream::FuturesUnordered;
 use futures_util::task::noop_waker_ref;
-use futures_util::FutureExt as _;
+use futures_util::{pin_mut, ready, FutureExt as _, Stream, StreamExt};
 use parking_lot::Mutex;
 use pin_project_lite::pin_project;
 use tokio::sync::futures::Notified;
@@ -125,7 +129,7 @@ use tokio::task::{self, JoinError, JoinHandle};
 
 /// Internal data shared by [`Tasker`] as well as [`Stopper`] clones.
 struct Shared {
-    handles: Mutex<Vec<JoinHandle<()>>>,
+    handles: Mutex<FuturesUnordered<JoinHandle<()>>>,
     /// Number of outstanding `Tasker` clones.
     // NB. We can't use Arc's strong count as `Stopper` also needs a (strong) clone.
     num_clones: AtomicU32,
@@ -137,7 +141,7 @@ struct Shared {
 impl Shared {
     pub(crate) fn new() -> Self {
         Self {
-            handles: Mutex::new(vec![]),
+            handles: Mutex::new(FuturesUnordered::new()),
             num_clones: AtomicU32::new(1),
             finished_clones: Semaphore::new(0),
             stopped: AtomicBool::new(false),
@@ -282,6 +286,31 @@ impl Signaller {
     }
 }
 
+pin_project! {
+    /// Stream for the [`join_stream()`][Tasker::join_stream()] method.
+    pub struct JoinStream {
+        await_finished: Fuse<Pin<Box<dyn Future<Output = ()>>>>,
+        #[pin] handles: FuturesUnordered<JoinHandle<()>>,
+    }
+}
+
+impl Stream for JoinStream {
+    type Item = Result<(), JoinError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let await_finished = this.await_finished;
+        let handles = this.handles;
+
+        if !await_finished.is_terminated() {
+            pin_mut!(await_finished);
+            ready!(await_finished.poll(cx));
+        }
+
+        handles.poll_next(cx)
+    }
+}
+
 // TODO: Debug impls
 
 /// Manages a group of tasks.
@@ -397,7 +426,7 @@ impl Tasker {
         }
     }
 
-    fn take_handles(&self) -> Vec<JoinHandle<()>> {
+    fn take_handles(&self) -> FuturesUnordered<JoinHandle<()>> {
         let mut lock = self.shared.handles.lock();
         mem::take(&mut *lock)
     }
@@ -411,8 +440,8 @@ impl Tasker {
         self.await_finished().await;
 
         let mut handles = self.take_handles();
-        for handle in handles.drain(..) {
-            handle.await.expect("Join error");
+        while let Some(handle) = handles.next().await {
+            handle.expect("Join error");
         }
     }
 
@@ -423,13 +452,29 @@ impl Tasker {
     pub async fn try_join(self) -> Vec<Result<(), JoinError>> {
         self.await_finished().await;
 
-        let mut handles = self.take_handles();
-        let mut res = Vec::with_capacity(handles.len());
-        for handle in handles.drain(..) {
-            res.push(handle.await);
-        }
+        let handles = self.take_handles();
+        handles.collect().await
+    }
 
-        res
+    /// Returns a `Stream` which yields join results as they become available,
+    /// ie. as the tasks terminate.
+    ///
+    /// If any of the tasks terminates earlier than others, such as due to a panic,
+    /// its result should be readily avialable through this stream.
+    ///
+    /// Note that just like with `join()` and `try_join()`, the stream will first
+    /// wait until all `Tasker` clones are finished (via [`finish()`][Tasker::finish()] or drop)
+    /// before yielding results.
+    pub fn join_stream(self) -> JoinStream {
+        let handles = self.take_handles();
+        let await_finished: Box<dyn Future<Output = ()>> = Box::new(async move {
+            self.await_finished().await;
+        });
+
+        JoinStream {
+            await_finished: Pin::from(await_finished).fuse(),
+            handles,
+        }
     }
 
     /// Mark this `Tasker` clone as finished.
@@ -449,56 +494,42 @@ impl Tasker {
     /// Poll tasks once and join those that are finished.
     ///
     /// Handles to tasks that are finished executing will be
-    /// removed from the internal storage (which will be shrunk).
+    /// removed from the internal storage.
     ///
     /// Returns the number of tasks that were joined.
     ///
     /// **This function will panic if any of the tasks panicked**.
     /// Use [`try_poll_join()`][Tasker::try_poll_join()] if you need to handle task panics yourself.
     pub fn poll_join(&self) -> usize {
-        let mut lock = self.shared.handles.lock();
-
-        let num_original = lock.len();
+        let mut handles = self.shared.handles.lock();
         let mut cx_noop = Context::from_waker(noop_waker_ref());
 
-        let pending_handles: Vec<_> = lock
-            .drain(..)
-            .filter_map(move |mut handle| match handle.poll_unpin(&mut cx_noop) {
-                Poll::Ready(result) => {
-                    result.expect("Join error");
-                    None
-                }
-                Poll::Pending => Some(handle),
-            })
-            .collect();
+        let mut num_joined = 0;
+        while let Poll::Ready(Some(result)) = handles.poll_next_unpin(&mut cx_noop) {
+            result.expect("Join error");
+            num_joined += 1;
+        }
 
-        let num_joined = num_original - pending_handles.len();
-        *lock = pending_handles;
         num_joined
     }
 
     /// Poll tasks once and join those that are already done.
     ///
     /// Handles to tasks that are already finished executing will be joined
-    /// and removed from the internal storage (which will be shrunk).
+    /// and removed from the internal storage.
     ///
     /// Returns vector of join results of tasks that were joined
     /// (may be empty if no tasks could've been joined).
     pub fn try_poll_join(&self) -> Vec<Result<(), JoinError>> {
-        let mut lock = self.shared.handles.lock();
+        let mut handles = self.shared.handles.lock();
 
         let mut cx_noop = Context::from_waker(noop_waker_ref());
-        let mut pending_handles = vec![];
         let mut ready_results = vec![];
 
-        for mut handle in lock.drain(..) {
-            match handle.poll_unpin(&mut cx_noop) {
-                Poll::Ready(result) => ready_results.push(result),
-                Poll::Pending => pending_handles.push(handle),
-            }
+        while let Poll::Ready(Some(result)) = handles.poll_next_unpin(&mut cx_noop) {
+            ready_results.push(result);
         }
 
-        *lock = pending_handles;
         ready_results
     }
 }

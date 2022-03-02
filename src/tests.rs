@@ -26,17 +26,34 @@ async fn stopable_stream(stopper: Stopper) {
     while let Some(_) = stream.next().await {}
 }
 
+async fn yield_to_tokio() {
+    for _ in 0..10 {
+        task::yield_now().await;
+        time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 macro_rules! test_st_mt {
-    ($st_name:ident, $mt_name:ident, $test:expr) => {
+    (@ $st_name:ident, $mt_name:ident, $attr:meta, $test:expr) => {
         #[tokio::test(flavor = "current_thread")]
+        #[$attr]
         async fn $st_name() {
             $test
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        #[$attr]
         async fn $mt_name() {
             $test
         }
+    };
+
+    ($st_name:ident, $mt_name:ident, $test:expr) => {
+        test_st_mt!(@ $st_name, $mt_name, doc(), $test);
+    };
+
+    (#[should_panic] $st_name:ident, $mt_name:ident, $test:expr) => {
+        test_st_mt!(@ $st_name, $mt_name, should_panic, $test);
     };
 }
 
@@ -79,6 +96,21 @@ test_st_mt!(many_taskers_st, many_taskers_mt, {
     assert_eq!(num_stopped, 100);
 });
 
+test_st_mt!(
+    #[should_panic]
+    join_panic_st,
+    join_panic_mt,
+    {
+        let tasker = Tasker::new();
+
+        tasker.spawn(future::pending::<()>());
+        tasker.spawn(async { panic!("Things aren't going well") });
+
+        tasker.stop();
+        tasker.join().await;
+    }
+);
+
 test_st_mt!(try_join_st, try_join_mt, {
     let tasker = Tasker::new();
 
@@ -91,12 +123,26 @@ test_st_mt!(try_join_st, try_join_mt, {
     assert!(res[1].as_ref().unwrap_err().is_panic());
 });
 
-async fn yield_to_tokio() {
-    for _ in 0..10 {
-        task::yield_now().await;
-        time::sleep(Duration::from_millis(10)).await;
-    }
-}
+test_st_mt!(join_stream_st, join_stream_mt, {
+    let tasker = Tasker::new();
+
+    tasker.spawn(future::pending::<()>());
+    tasker.spawn(async { panic!("Things aren't going well") });
+    let tasker2 = tasker.clone();
+
+    tasker.stop();
+
+    // Assert that the join stream won't start yielding results
+    // until all tasker clones are done.
+    let mut join_stream = tasker.join_stream();
+    assert!(poll!(join_stream.next()).is_pending());
+
+    tasker2.finish();
+
+    // We should get a result now, even if the pending future is still, uh, pending.
+    let res = join_stream.next().await.unwrap();
+    assert!(res.unwrap_err().is_panic());
+});
 
 test_st_mt!(poll_join_st, poll_join_mt, {
     let tasker = Tasker::new();
