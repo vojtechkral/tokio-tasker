@@ -121,8 +121,13 @@ test_st_mt!(try_join_st, try_join_mt, {
 
     tasker.stop();
     let res = tasker.try_join().await;
-    res[0].as_ref().unwrap();
-    assert!(res[1].as_ref().unwrap_err().is_panic());
+
+    let (oks, errs) = res.iter().fold((0, 0), |(oks, errs), res| match res {
+        Ok(_) => (oks + 1, errs),
+        Err(_) => (oks, errs + 1),
+    });
+    assert_eq!(oks, 1);
+    assert_eq!(errs, 1);
 });
 
 test_st_mt!(join_stream_st, join_stream_mt, {
