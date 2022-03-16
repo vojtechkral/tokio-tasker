@@ -1,7 +1,11 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
+use futures_util::future::FusedFuture;
 use futures_util::{future, poll, stream, StreamExt};
-use tokio::time;
+use tokio::{task, time};
 
 use super::*;
 
