@@ -3,7 +3,7 @@ use std::mem;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::vec;
 
 use futures_util::stream::FuturesUnordered;
@@ -15,9 +15,45 @@ use tokio::task::{self, JoinError, JoinHandle};
 
 use crate::{JoinStream, Signaller, Stopper};
 
+#[derive(Default)]
+pub(crate) struct Handles {
+    handles: FuturesUnordered<JoinHandle<()>>,
+    waker: Option<Waker>,
+}
+
+impl Handles {
+    fn new() -> Self {
+        Self {
+            handles: FuturesUnordered::new(),
+            waker: None,
+        }
+    }
+
+    fn wake(&mut self) {
+        self.waker.take().map(Waker::wake);
+        // ^ notifies runtime to repoll JoinStream, if any
+    }
+
+    fn push(&mut self, handle: JoinHandle<()>) {
+        self.handles.push(handle);
+        self.wake();
+    }
+
+    pub(crate) fn set_waker(&mut self, cx: &Context<'_>) {
+        self.waker = Some(cx.waker().clone());
+    }
+
+    pub(crate) fn poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<(), JoinError>>> {
+        self.handles.poll_next_unpin(cx)
+    }
+}
+
 /// Internal data shared by [`Tasker`] as well as [`Stopper`] clones.
 pub(crate) struct Shared {
-    handles: Mutex<FuturesUnordered<JoinHandle<()>>>,
+    pub(crate) handles: Mutex<Handles>,
     /// Number of outstanding `Tasker` clones.
     // NB. We can't use Arc's strong count as `Stopper` also needs a (strong) clone.
     num_clones: AtomicU32,
@@ -29,7 +65,7 @@ pub(crate) struct Shared {
 impl Shared {
     pub(crate) fn new() -> Self {
         Self {
-            handles: Mutex::new(FuturesUnordered::new()),
+            handles: Mutex::new(Handles::new()),
             num_clones: AtomicU32::new(1),
             finished_clones: Semaphore::new(0),
             stopped: AtomicBool::new(false),
@@ -46,6 +82,12 @@ impl Shared {
         }
 
         stop
+    }
+
+    pub(crate) fn all_finished(&self) -> bool {
+        self.finished_clones.is_closed()
+            || self.finished_clones.available_permits()
+                == self.num_clones.load(Ordering::SeqCst) as usize
     }
 }
 
@@ -140,11 +182,12 @@ impl Tasker {
 
     /// Number of tasks currently belonging to this task group.
     pub fn num_tasks(&self) -> usize {
-        self.shared.handles.lock().len()
+        self.shared.handles.lock().handles.len()
     }
 
     fn mark_finished(&self) {
         self.shared.finished_clones.add_permits(1);
+        self.shared.handles.lock().wake();
     }
 
     /// Wait until all clones are finished.
@@ -168,7 +211,7 @@ impl Tasker {
         }
     }
 
-    fn take_handles(&self) -> FuturesUnordered<JoinHandle<()>> {
+    fn take_handles(&self) -> Handles {
         let mut lock = self.shared.handles.lock();
         mem::take(&mut *lock)
     }
@@ -182,7 +225,7 @@ impl Tasker {
         self.await_finished().await;
 
         let mut handles = self.take_handles();
-        while let Some(handle) = handles.next().await {
+        while let Some(handle) = handles.handles.next().await {
             handle.expect("Join error");
         }
     }
@@ -195,7 +238,7 @@ impl Tasker {
         self.await_finished().await;
 
         let handles = self.take_handles();
-        handles.collect().await
+        handles.handles.collect().await
     }
 
     /// Returns a `Stream` which yields join results as they become available,
@@ -204,19 +247,11 @@ impl Tasker {
     /// If any of the tasks terminates earlier than others, such as due to a panic,
     /// its result should be readily avialable through this stream.
     ///
-    /// Note that just like with `join()` and `try_join()`, the stream will first
-    /// wait until all `Tasker` clones are finished (via [`finish()`][Tasker::finish()] or drop)
-    /// before yielding results.
+    /// The join stream stops after all tasks are joined *and* all other `Tasker`
+    /// clones are finished (via [`finish()`][Tasker::finish()] or drop).
     pub fn join_stream(self) -> JoinStream {
-        let handles = self.take_handles();
-        let await_finished: Box<dyn Future<Output = ()>> = Box::new(async move {
-            self.await_finished().await;
-        });
-
-        JoinStream {
-            await_finished: Pin::from(await_finished).fuse(),
-            handles,
-        }
+        JoinStream::new(self.shared.clone())
+        // self is dropped and marked finished
     }
 
     /// Mark this `Tasker` clone as finished.
@@ -247,7 +282,7 @@ impl Tasker {
         let mut cx_noop = Context::from_waker(noop_waker_ref());
 
         let mut num_joined = 0;
-        while let Poll::Ready(Some(result)) = handles.poll_next_unpin(&mut cx_noop) {
+        while let Poll::Ready(Some(result)) = handles.handles.poll_next_unpin(&mut cx_noop) {
             result.expect("Join error");
             num_joined += 1;
         }
@@ -268,7 +303,7 @@ impl Tasker {
         let mut cx_noop = Context::from_waker(noop_waker_ref());
         let mut ready_results = vec![];
 
-        while let Poll::Ready(Some(result)) = handles.poll_next_unpin(&mut cx_noop) {
+        while let Poll::Ready(Some(result)) = handles.handles.poll_next_unpin(&mut cx_noop) {
             ready_results.push(result);
         }
 
