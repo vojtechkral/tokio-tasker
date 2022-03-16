@@ -120,6 +120,3 @@ pub use stopper::{Stopped, Stopper};
 pub use tasker::Tasker;
 
 // TODO: Debug impls
-
-#[cfg(test)]
-mod tests;

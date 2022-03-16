@@ -7,9 +7,7 @@ use futures_util::future::FusedFuture;
 use futures_util::{future, poll, stream, StreamExt};
 use tokio::{task, time};
 
-use super::*;
-
-// TODO: Move as int test?
+use tokio_tasker::*;
 
 async fn stopable_future(mut stopper: Stopper) -> Result<(), Stopped> {
     let mut unless = future::pending::<()>().unless(&mut stopper);
