@@ -144,6 +144,26 @@ test_st_mt!(join_stream_st, join_stream_mt, {
     assert!(res.unwrap_err().is_panic());
 });
 
+test_st_mt!(join_stream_issue2_st, join_stream_issue2_mt, {
+    // https://github.com/vojtechkral/tokio-tasker/issues/2
+
+    let tasker = Tasker::new();
+    let tasker2 = tasker.clone();
+
+    tasker.spawn(async move {
+        yield_to_tokio().await;
+        // time::sleep(Duration::from_millis(500)).await;
+        tasker2.spawn(async {
+            panic!("foo");
+        });
+        tasker2.finish();
+    });
+
+    let stream = tasker.join_stream();
+    let results: Vec<_> = stream.collect().await;
+    assert_eq!(results.len(), 2);
+});
+
 test_st_mt!(poll_join_st, poll_join_mt, {
     let tasker = Tasker::new();
 
