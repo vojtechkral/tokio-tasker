@@ -10,7 +10,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::task::noop_waker_ref;
 use futures_util::{FutureExt as _, StreamExt};
 use parking_lot::Mutex;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 use tokio::task::{self, JoinError, JoinHandle};
 
 use crate::{JoinStream, Signaller, Stopper};
@@ -57,7 +57,7 @@ pub(crate) struct Shared {
     /// Number of outstanding `Tasker` clones.
     // NB. We can't use Arc's strong count as `Stopper` also needs a (strong) clone.
     num_clones: AtomicU32,
-    finished_clones: Semaphore,
+    finished_clones: AtomicU32,
     pub(crate) stopped: AtomicBool,
     pub(crate) notify_stop: Notify,
 }
@@ -67,7 +67,7 @@ impl Shared {
         Self {
             handles: Mutex::new(Handles::new()),
             num_clones: AtomicU32::new(1),
-            finished_clones: Semaphore::new(0),
+            finished_clones: AtomicU32::new(0),
             stopped: AtomicBool::new(false),
             notify_stop: Notify::new(),
         }
@@ -85,9 +85,7 @@ impl Shared {
     }
 
     pub(crate) fn all_finished(&self) -> bool {
-        self.finished_clones.is_closed()
-            || self.finished_clones.available_permits()
-                == self.num_clones.load(Ordering::SeqCst) as usize
+        self.finished_clones.load(Ordering::SeqCst) == self.num_clones.load(Ordering::SeqCst)
     }
 }
 
@@ -186,59 +184,31 @@ impl Tasker {
     }
 
     fn mark_finished(&self) {
-        self.shared.finished_clones.add_permits(1);
+        self.shared.finished_clones.fetch_add(1, Ordering::SeqCst);
         self.shared.handles.lock().wake();
     }
 
-    /// Wait until all clones are finished.
-    async fn await_finished(&self) {
-        if self.shared.finished_clones.is_closed() {
-            return;
-        }
-
-        self.mark_finished();
-
-        let clones = self.shared.num_clones.load(Ordering::SeqCst);
-        if self
-            .shared
-            .finished_clones
-            .acquire_many(clones)
-            .await
-            .is_ok()
-        {
-            // Mark all as finished by closing the sema
-            self.shared.finished_clones.close();
-        }
-    }
-
-    fn take_handles(&self) -> Handles {
-        let mut lock = self.shared.handles.lock();
-        mem::take(&mut *lock)
-    }
-
-    /// Wait until all `Tasker` clones are finished (via [`finish()`][Tasker::finish()] or drop)
-    /// and then join all the tasks in the group.
+    /// Join all the tasks in the group.
     ///
     /// **This function will panic if any of the tasks panicked**.
     /// Use [`try_join()`][Tasker::try_join()] if you need to handle task panics yourself.
+    ///
+    /// Note that `join()` will only return once all other `Tasker` clones are finished
+    /// (via [`finish()`][Tasker::finish()] or drop).
     pub async fn join(self) {
-        self.await_finished().await;
-
-        let mut handles = self.take_handles();
-        while let Some(handle) = handles.handles.next().await {
+        let mut join_stream = self.join_stream();
+        while let Some(handle) = join_stream.next().await {
             handle.expect("Join error");
         }
     }
 
-    /// Wait until all `Tasker` clones are finished (via [`finish()`][Tasker::finish()] or drop)
-    /// and then join all the tasks in the group.
+    /// Join all the tasks in the group, returning a vector of join results
+    /// (ie. results of tokio's [`JoinHandle`][tokio::task::JoinHandle]).
     ///
-    /// Returns a vector of join results (ie. results of tokio's [`JoinHandle`][tokio::task::JoinHandle]).
+    /// Note that `try_join()` will only return once all other `Tasker` clones are finished
+    /// (via [`finish()`][Tasker::finish()] or drop).
     pub async fn try_join(self) -> Vec<Result<(), JoinError>> {
-        self.await_finished().await;
-
-        let handles = self.take_handles();
-        handles.handles.collect().await
+        self.join_stream().collect().await
     }
 
     /// Returns a `Stream` which yields join results as they become available,
