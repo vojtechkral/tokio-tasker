@@ -7,7 +7,7 @@ use tokio::task::JoinError;
 
 use crate::tasker::Shared;
 
-/// Stream for the [`join_stream()`][Tasker::join_stream()] method.
+/// Stream for the [`join_stream()`][crate::Tasker::join_stream()] method.
 pub struct JoinStream {
     shared: Pin<Arc<Shared>>,
 }

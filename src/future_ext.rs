@@ -84,20 +84,24 @@ where
 }
 
 /// A [`Future`][std::future::Future] extension adding the [`.unless()`][FutureExt::unless()]
-/// method that is desinged to be used with a [`Stopper`].
+/// method that is desinged to be used with a [`Stopper`][crate::Stopper].
 pub trait FutureExt {
     /// Wrap a future to be stopped from resolving if the `unless` future resolves first.
     ///
     /// This is exactly the same operation as future's `.select()`, but better designed
-    /// for stopping futures with the [`Stopper`]. (And without `Unpin` requirement.)
+    /// for stopping futures with the [`Stopper`] and without the `Unpin` requirement.
     ///
     /// Unlike `Select`, this future yields a `Result`
     /// where in the `Ok()` variant the result of the original future is returned,
     /// and in the `Err()` variant the result of the `unless` future
     /// is returned in case the `unless` future resolved first.
     ///
-    /// When used with [`Stopper`], the future will yield [`Err(Stopped)`][Stopped]
+    /// When used with [`Stopper`], the future will yield [`Err(Stopped)`]
     /// if it is stopped by the associated [`Tasker`].
+    ///
+    /// [`Tasker`]: crate::Tasker
+    /// [`Stopper`]: crate::Stopper
+    /// [`Err(Stopped)`]: crate::Stopped
     fn unless<U>(self, unless: U) -> Unless<Self, U>
     where
         Self: Sized,

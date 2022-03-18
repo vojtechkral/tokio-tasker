@@ -36,6 +36,10 @@ pin_project! {
     /// handle of the task group (either [`Tasker`] or [`Signaller`]).
     ///
     /// Obtained with [`Tasker::stopper()`].
+    ///
+    /// [`Tasker`]: crate::Tasker
+    /// [`Signaller`]: crate::Signaller
+    /// [`Tasker::stopper()`]: crate::Tasker::stopper()
     pub struct Stopper {
         // SAFETY: Drop order matters! `notified` must come before `shared`.
         #[pin] notified: Option<Pin<Box<Notified<'static>>>>,

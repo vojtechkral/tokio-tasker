@@ -97,13 +97,13 @@ impl Default for Shared {
 
 /// Manages a group of tasks.
 ///
-/// _See [library-level][self] documentation._
+/// _See [library-level][crate] documentation._
 pub struct Tasker {
     shared: Pin<Arc<Shared>>,
 }
 
 impl Tasker {
-    /// Constructor.
+    /// Constructs and empty task set.
     pub fn new() -> Self {
         Self {
             shared: Arc::pin(Shared::new()),
@@ -148,9 +148,12 @@ impl Tasker {
     /// Dispense a [`Stopper`], a future that will resolve once `.stop()`
     /// is called on any `Tasker` (or signaller [`Signaller`]) clone.
     ///
-    /// The `Stopper` future can be used with our [`.unless()`][FutureExt::unless()]
-    /// extension to stop `Future`s, with [`.take_until()`][futures_util::stream::StreamExt::take_until()]
-    /// to stop `Stream`s, as part of `tokio::select!()`, and similar...
+    /// The `Stopper` future can be used with our [`.unless()`]
+    /// extension to stop `Future`s, with [`.take_until()`] to stop `Stream`s,
+    /// as part of `tokio::select!()`, and similar...
+    ///
+    /// [`.unless()`]: crate::FutureExt::unless()
+    /// [`.take_until()`]: futures_util::stream::StreamExt::take_until()
     pub fn stopper(&self) -> Stopper {
         Stopper::new(&self.shared)
     }
