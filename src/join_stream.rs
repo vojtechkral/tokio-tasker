@@ -1,3 +1,4 @@
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -37,5 +38,13 @@ impl Stream for JoinStream {
                 Poll::Pending
             }
         }
+    }
+}
+
+impl fmt::Debug for JoinStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JoinStream")
+            .field("tasker", &self.shared.ptr())
+            .finish()
     }
 }

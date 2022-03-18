@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::Weak;
 
 use crate::tasker::Shared;
@@ -32,5 +33,12 @@ impl Signaller {
         } else {
             false
         }
+    }
+}
+
+impl fmt::Debug for Signaller {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ptr = self.shared.upgrade().map(|shared| shared.ptr());
+        f.debug_struct("Signaller").field("shared", &ptr).finish()
     }
 }

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::future::Future;
 use std::mem;
 use std::pin::Pin;
@@ -86,6 +87,10 @@ impl Shared {
 
     pub(crate) fn all_finished(&self) -> bool {
         self.finished_clones.load(Ordering::SeqCst) == self.num_clones.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn ptr(&self) -> *const Self {
+        self as _
     }
 }
 
@@ -303,5 +308,11 @@ impl Clone for Tasker {
 impl Drop for Tasker {
     fn drop(&mut self) {
         self.mark_finished();
+    }
+}
+
+impl fmt::Debug for Tasker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Tasker").field(&self.shared.ptr()).finish()
     }
 }

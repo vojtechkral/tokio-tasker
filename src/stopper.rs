@@ -108,3 +108,12 @@ impl Clone for Stopper {
         Self::new(&self.shared)
     }
 }
+
+impl fmt::Debug for Stopper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stopper")
+            .field("tasker", &self.shared.ptr())
+            .field("stopped", &self.is_stopped())
+            .finish()
+    }
+}
